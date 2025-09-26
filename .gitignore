@@ -92,4 +92,4 @@ __pycache__/
 *.env
 *.log
 
-/server/TestServer_env
+/TestServer/TestServer_env
