@@ -5,7 +5,6 @@ using UnityEngine;
 
 public class CameraController : MonoBehaviour
 {
-    // Cache
     private RenderTexture _rt;
     private Texture2D _tex;
     private int _cachedW, _cachedH;
@@ -16,6 +15,7 @@ public class CameraController : MonoBehaviour
         Cam = GetComponent<Camera>();
     }
 
+    // CameraScreen API
     public string GetCameraScreen(int width, int height, int jpegQuality = 70)
     {
         if (!Cam) return null;
@@ -49,6 +49,8 @@ public class CameraController : MonoBehaviour
     }
     void OnDestroy() => ReleaseCapture();
 
+
+    // Position & Rotation API
     public Vector3 GetCameraPosition() { return transform.position; }
     public void SetCameraPosition(Vector3 pos) { transform.position = pos; }
     public Vector3 GetCameraEulerAngles() { return transform.eulerAngles; }

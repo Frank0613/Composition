@@ -2007,10 +2007,10 @@ MonoBehaviour:
   m_EditorClassIdentifier: 
   targetCamera: {fileID: 39176957}
   wsUrl: ws://127.0.0.1:8765
-  sendFPS: 30
+  sendFPS: 20
   captureWidth: 640
   captureHeight: 360
-  jpegQuality: 1
+  jpegQuality: 60
 --- !u!1001 &172453338539117362
 PrefabInstance:
   m_ObjectHideFlags: 0

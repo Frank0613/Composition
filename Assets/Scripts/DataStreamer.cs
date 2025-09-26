@@ -50,6 +50,7 @@ public class DataStreamer : MonoBehaviour
     private WaitForSeconds _wait;
     private long _seq = 0;
     private readonly ConcurrentQueue<Action> _mainJobs = new ConcurrentQueue<Action>();
+    Task _inflightSend;
 
     void Awake()
     {
@@ -93,13 +94,13 @@ public class DataStreamer : MonoBehaviour
         while (true)
         {
             yield return _wait;
-
             if (_ws == null || _ws.State != WebSocketState.Open) continue;
 
-            // 透過 CameraController 擷取畫面（JPG → Base64）
+            // 丟幀策略：上一個送出還沒完成就跳過
+            if (_inflightSend != null && !_inflightSend.IsCompleted) continue;
+
             string b64 = cameraController.GetCameraScreen(captureWidth, captureHeight, jpegQuality);
 
-            // 打包單一 JSON
             var t = targetCamera.transform;
             var packet = new PacketOut
             {
@@ -113,41 +114,42 @@ public class DataStreamer : MonoBehaviour
                 imageJpegBase64 = b64
             };
 
-            string json = JsonUtility.ToJson(packet);
-            var buffer = Encoding.UTF8.GetBytes(json);
-
-            // 送出（文字訊息）
+            var buffer = Encoding.UTF8.GetBytes(JsonUtility.ToJson(packet));
             var seg = new ArraySegment<byte>(buffer);
-            var sendTask = _ws.SendAsync(seg, WebSocketMessageType.Text, true, _cts.Token);
-            while (!sendTask.IsCompleted) yield return null; // 不阻塞主執行緒
-            if (sendTask.IsFaulted) Debug.LogWarning("[WS] Send faulted: " + sendTask.Exception?.Message);
+            _inflightSend = _ws.SendAsync(seg, WebSocketMessageType.Text, true, _cts.Token);
+            // 不等待，下一圈再看它是否完成
         }
     }
     async Task ReceiveLoop()
     {
-        var buffer = new byte[1024 * 1024]; // 1MB 暫存，可視需要加大
-        var seg = new ArraySegment<byte>(buffer);
-
+        var buffer = new byte[1024 * 1024]; // 1MB
         try
         {
             while (_ws.State == WebSocketState.Open && !_cts.IsCancellationRequested)
             {
-                WebSocketReceiveResult result;
                 int offset = 0;
+                WebSocketReceiveResult result;
                 do
                 {
+                    var seg = new ArraySegment<byte>(buffer, offset, buffer.Length - offset);
                     result = await _ws.ReceiveAsync(seg, _cts.Token);
+
                     if (result.MessageType == WebSocketMessageType.Close)
                     {
                         await _ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "bye", _cts.Token);
                         Debug.Log("[WS] Closed by server");
                         return;
                     }
+
                     offset += result.Count;
-                    if (offset >= buffer.Length) { Debug.LogWarning("[WS] Message too large"); break; }
+                    if (offset >= buffer.Length)
+                    {
+                        Debug.LogWarning("[WS] Message too large");
+                        break;
+                    }
                 } while (!result.EndOfMessage);
 
-                if (result.MessageType == WebSocketMessageType.Text)
+                if (result.MessageType == WebSocketMessageType.Text && offset > 0)
                 {
                     string msg = Encoding.UTF8.GetString(buffer, 0, offset);
                     try
@@ -157,10 +159,8 @@ public class DataStreamer : MonoBehaviour
                         {
                             _mainJobs.Enqueue(() =>
                             {
-                                if (inbound.position != null)
-                                    cameraController.SetCameraPosition(inbound.position.ToV3());
-                                if (inbound.rotationEuler != null)
-                                    cameraController.SetCameraEulerAngles(inbound.rotationEuler.ToV3());
+                                if (inbound.position != null) cameraController.SetCameraPosition(inbound.position.ToV3());
+                                if (inbound.rotationEuler != null) cameraController.SetCameraEulerAngles(inbound.rotationEuler.ToV3());
                             });
                         }
                     }
@@ -171,12 +171,13 @@ public class DataStreamer : MonoBehaviour
                 }
             }
         }
-        catch (OperationCanceledException) { /* ignore on shutdown */ }
+        catch (OperationCanceledException) { }
         catch (Exception e)
         {
             Debug.LogWarning("[WS] ReceiveLoop error: " + e.Message);
         }
     }
+
     async void OnDisable()
     {
         try
