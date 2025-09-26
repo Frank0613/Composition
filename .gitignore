@@ -85,8 +85,11 @@ env.bak/
 *.pyo
 *.pyd
 __pycache__/
+**/pyvenv.cfg
 
 # ========== Env / secrets ========== #
 .env
 *.env
 *.log
+
+/server/TestServer_env
