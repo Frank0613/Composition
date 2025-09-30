@@ -8,7 +8,16 @@ using System.Threading.Tasks;
 using UnityEngine;
 
 
-[Serializable] class Vec3 { public float x, y, z; public Vec3() { } public Vec3(Vector3 v) { x = v.x; y = v.y; z = v.z; } public Vector3 ToV3() => new Vector3(x, y, z); }
+[Serializable]
+class Vec3
+{
+    public float x, y, z;
+    public Vec3() { }
+    public Vec3(Vector3 v) { x = v.x; y = v.y; z = v.z; }
+    public Vector3 ToV3() => new Vector3(x, y, z);
+}
+
+// Packages to be sent out
 [Serializable]
 class PacketOut
 {
@@ -16,14 +25,16 @@ class PacketOut
     public long timestampMs;
     public Vec3 position;
     public Vec3 rotationEuler;
-    public float fov;
+    public float fov; // field of view
     public int width, height;
     public string imageJpegBase64;
 }
+
+// Packages sent back by the server
 [Serializable]
 class PacketIn
 {
-    public bool apply;
+    public bool apply; // respone
     public long seq;
     public Vec3 position;
     public Vec3 rotationEuler;
@@ -45,12 +56,12 @@ public class DataStreamer : MonoBehaviour
     public int captureHeight = 360;
     [Range(1, 100)] public int jpegQuality = 70;
 
-    private ClientWebSocket _ws;
-    private CancellationTokenSource _cts;
-    private WaitForSeconds _wait;
-    private long _seq = 0;
-    private readonly ConcurrentQueue<Action> _mainJobs = new ConcurrentQueue<Action>();
-    Task _inflightSend;
+    private ClientWebSocket _ws; // WebSocket Connection Object
+    private CancellationTokenSource _cts; // Control cancellation, interrupt WebSocket at any time
+    private WaitForSeconds _wait; // FPS Controller
+    private long _seq = 0; // Packet sequence number
+    private readonly ConcurrentQueue<Action> _mainJobs = new ConcurrentQueue<Action>(); // Main thread task queue
+    Task _inflightSend; // Avoid packet stuck
 
     void Awake()
     {
@@ -81,8 +92,8 @@ public class DataStreamer : MonoBehaviour
             enabled = false; return;
         }
 
-        _ = Task.Run(ReceiveLoop);
-        StartCoroutine(SendLoop());
+        _ = Task.Run(ReceiveLoop); // Open ReceiveLoop
+        StartCoroutine(SendLoop()); // Open SendLoop
     }
     void Update()
     {
@@ -96,28 +107,30 @@ public class DataStreamer : MonoBehaviour
             yield return _wait;
             if (_ws == null || _ws.State != WebSocketState.Open) continue;
 
-            // 丟幀策略：上一個送出還沒完成就跳過
+            // Skip the previous one if it is not finished yet
             if (_inflightSend != null && !_inflightSend.IsCompleted) continue;
 
             string b64 = cameraController.GetCameraScreen(captureWidth, captureHeight, jpegQuality);
+            Vector3 _pos = cameraController.GetCameraPosition();
+            Vector3 _eul = cameraController.GetCameraEulerAngles();
+            float _fov = cameraController.GetCameraFOV();
 
-            var t = targetCamera.transform;
             var packet = new PacketOut
             {
                 seq = ++_seq,
                 timestampMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
-                position = new Vec3(t.position),
-                rotationEuler = new Vec3(t.eulerAngles),
-                fov = targetCamera.fieldOfView,
+                position = new Vec3(_pos),
+                rotationEuler = new Vec3(_eul),
+                fov = _fov,
                 width = captureWidth,
                 height = captureHeight,
                 imageJpegBase64 = b64
             };
 
-            var buffer = Encoding.UTF8.GetBytes(JsonUtility.ToJson(packet));
+            var buffer = Encoding.UTF8.GetBytes(JsonUtility.ToJson(packet)); // Convert PacketOut to Json file
             var seg = new ArraySegment<byte>(buffer);
-            _inflightSend = _ws.SendAsync(seg, WebSocketMessageType.Text, true, _cts.Token);
-            // 不等待，下一圈再看它是否完成
+            _inflightSend = _ws.SendAsync(seg, WebSocketMessageType.Text, true, _cts.Token); // Send this data asynchronously via WebSocket and save the returned Task to _inflightSend
+
         }
     }
     async Task ReceiveLoop()
@@ -125,6 +138,7 @@ public class DataStreamer : MonoBehaviour
         var buffer = new byte[1024 * 1024]; // 1MB
         try
         {
+            // keep receiving
             while (_ws.State == WebSocketState.Open && !_cts.IsCancellationRequested)
             {
                 int offset = 0;
@@ -134,6 +148,7 @@ public class DataStreamer : MonoBehaviour
                     var seg = new ArraySegment<byte>(buffer, offset, buffer.Length - offset);
                     result = await _ws.ReceiveAsync(seg, _cts.Token);
 
+                    // If server closed
                     if (result.MessageType == WebSocketMessageType.Close)
                     {
                         await _ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "bye", _cts.Token);
@@ -141,6 +156,7 @@ public class DataStreamer : MonoBehaviour
                         return;
                     }
 
+                    // If msg too large -> quit
                     offset += result.Count;
                     if (offset >= buffer.Length)
                     {
@@ -154,7 +170,9 @@ public class DataStreamer : MonoBehaviour
                     string msg = Encoding.UTF8.GetString(buffer, 0, offset);
                     try
                     {
+                        // Receive Json -> PacketIn msg
                         var inbound = JsonUtility.FromJson<PacketIn>(msg);
+                        // If apply, throw into mainJob
                         if (inbound != null && inbound.apply)
                         {
                             _mainJobs.Enqueue(() =>
@@ -178,6 +196,7 @@ public class DataStreamer : MonoBehaviour
         }
     }
 
+    // Close the WebSocket and release resources
     async void OnDisable()
     {
         try
