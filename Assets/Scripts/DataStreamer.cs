@@ -1,215 +1,188 @@
 using System;
 using System.Collections;
-using System.Collections.Concurrent;
-using System.Net.WebSockets;
 using System.Text;
-using System.Threading;
-using System.Threading.Tasks;
 using UnityEngine;
+using UnityEngine.Networking;
+using Newtonsoft.Json.Linq;
 
 
 [Serializable]
-class Vec3
+public class CameraData
 {
-    public float x, y, z;
-    public Vec3() { }
-    public Vec3(Vector3 v) { x = v.x; y = v.y; z = v.z; }
-    public Vector3 ToV3() => new Vector3(x, y, z);
+    public PoseData pose;
+    public float fov;
+    public string image_b64;
+    public int width;
+    public int height;
+
+    [Serializable]
+    public class PoseData
+    {
+        public float px, py, pz;
+        public float rx, ry, rz;
+    }
 }
 
-// Packages to be sent out
 [Serializable]
-class PacketOut
+public class ResponseData
 {
-    public long seq;
-    public long timestampMs;
-    public Vec3 position;
-    public Vec3 rotationEuler;
-    public float fov; // field of view
-    public int width, height;
-    public string imageJpegBase64;
+    public bool apply; // whether to apply
+    public float? fov;
+    public ResponsePose pose;
+
+    [Serializable]
+    public class ResponsePose
+    {
+        public float? px, py, pz;
+        public float? rx, ry, rz;
+    }
 }
-
-// Packages sent back by the server
-[Serializable]
-class PacketIn
-{
-    public bool apply; // respone
-    public long seq;
-    public Vec3 position;
-    public Vec3 rotationEuler;
-}
-
-
 
 public class DataStreamer : MonoBehaviour
 {
     [Header("Refs")]
-    public Camera targetCamera;
-    private CameraController cameraController;
-    [Header("WebSocket")]
-    public string wsUrl = "ws://127.0.0.1:8765";
-    [Range(1, 60)] public int sendFPS = 15;
+    public CameraController cameraController;
 
-    [Header("Capture")]
-    public int captureWidth = 640;
-    public int captureHeight = 360;
-    [Range(1, 100)] public int jpegQuality = 70;
+    [Header("Server")]
+    public string serverBaseUrl = "http://127.0.0.1:8000";
+    public string telemetryEndpoint = "/telemetry";
+    public float sendInterval = 0.1f; // 10Hz
 
-    private ClientWebSocket _ws; // WebSocket Connection Object
-    private CancellationTokenSource _cts; // Control cancellation, interrupt WebSocket at any time
-    private WaitForSeconds _wait; // FPS Controller
-    private long _seq = 0; // Packet sequence number
-    private readonly ConcurrentQueue<Action> _mainJobs = new ConcurrentQueue<Action>(); // Main thread task queue
-    Task _inflightSend; // Avoid packet stuck
+    [Header("Image")]
+    public int imageWidth = 640;
+    public int imageHeight = 360;
+    [Range(1, 100)]
+    public int jpegQuality = 70;
+
+    [Header("Debug")]
+    public bool logEveryResponse = false;
+
+    private string _telemetryUrl;
 
     void Awake()
     {
-        if (!targetCamera) targetCamera = Camera.main;
-        cameraController = targetCamera.GetComponent<CameraController>();
-        if (!cameraController)
+        if (cameraController == null)
         {
-            Debug.LogError("CameraController not find");
-            enabled = false;
+            cameraController = GetComponent<CameraController>();
         }
-
-        _wait = new WaitForSeconds(1f / Mathf.Max(1, sendFPS));
-    }
-    async void OnEnable()
-    {
-        _cts = new CancellationTokenSource();
-        _ws = new ClientWebSocket();
-
-        try
-        {
-            var uri = new Uri(wsUrl);
-            await _ws.ConnectAsync(uri, _cts.Token);
-            Debug.Log("[WS] Connected");
-        }
-        catch (Exception e)
-        {
-            Debug.LogError("[WS] Connect failed: " + e.Message);
-            enabled = false; return;
-        }
-
-        _ = Task.Run(ReceiveLoop); // Open ReceiveLoop
-        StartCoroutine(SendLoop()); // Open SendLoop
-    }
-    void Update()
-    {
-        while (_mainJobs.TryDequeue(out var job)) job?.Invoke();
+        _telemetryUrl = serverBaseUrl.TrimEnd('/') + telemetryEndpoint;
     }
 
-    IEnumerator SendLoop()
+    void OnEnable()
     {
+        StartCoroutine(StreamLoop());
+    }
+
+    IEnumerator StreamLoop()
+    {
+        var wait = new WaitForSeconds(sendInterval);
         while (true)
         {
-            yield return _wait;
-            if (_ws == null || _ws.State != WebSocketState.Open) continue;
-
-            // Skip the previous one if it is not finished yet
-            if (_inflightSend != null && !_inflightSend.IsCompleted) continue;
-
-            string b64 = cameraController.GetCameraScreen(captureWidth, captureHeight, jpegQuality);
-            Vector3 _pos = cameraController.GetCameraPosition();
-            Vector3 _eul = cameraController.GetCameraEulerAngles();
-            float _fov = cameraController.GetCameraFOV();
-
-            var packet = new PacketOut
-            {
-                seq = ++_seq,
-                timestampMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
-                position = new Vec3(_pos),
-                rotationEuler = new Vec3(_eul),
-                fov = _fov,
-                width = captureWidth,
-                height = captureHeight,
-                imageJpegBase64 = b64
-            };
-
-            var buffer = Encoding.UTF8.GetBytes(JsonUtility.ToJson(packet)); // Convert PacketOut to Json file
-            var seg = new ArraySegment<byte>(buffer);
-            _inflightSend = _ws.SendAsync(seg, WebSocketMessageType.Text, true, _cts.Token); // Send this data asynchronously via WebSocket and save the returned Task to _inflightSend
-
+            yield return StartCoroutine(SendOnce());
+            yield return wait;
         }
     }
-    async Task ReceiveLoop()
+
+    IEnumerator SendOnce()
     {
-        var buffer = new byte[1024 * 1024]; // 1MB
-        try
+        if (cameraController == null) yield break;
+
+        // Get datas from camera
+        var pos = cameraController.GetCameraPosition();
+        var eul = cameraController.GetCameraEulerAngles();
+        var fov = cameraController.GetCameraFOV();
+        var b64 = cameraController.GetCameraScreen(imageWidth, imageHeight, jpegQuality);
+
+        // Put the datas into CameraData
+        var camdata = new CameraData
         {
-            // keep receiving
-            while (_ws.State == WebSocketState.Open && !_cts.IsCancellationRequested)
+            pose = new CameraData.PoseData
             {
-                int offset = 0;
-                WebSocketReceiveResult result;
-                do
-                {
-                    var seg = new ArraySegment<byte>(buffer, offset, buffer.Length - offset);
-                    result = await _ws.ReceiveAsync(seg, _cts.Token);
+                px = pos.x,
+                py = pos.y,
+                pz = pos.z,
+                rx = eul.x,
+                ry = eul.y,
+                rz = eul.z
+            },
+            fov = fov,
+            image_b64 = b64,
+            width = imageWidth,
+            height = imageHeight
+        };
 
-                    // If server closed
-                    if (result.MessageType == WebSocketMessageType.Close)
-                    {
-                        await _ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "bye", _cts.Token);
-                        Debug.Log("[WS] Closed by server");
-                        return;
-                    }
+        string json = JsonUtility.ToJson(camdata);
 
-                    // If msg too large -> quit
-                    offset += result.Count;
-                    if (offset >= buffer.Length)
-                    {
-                        Debug.LogWarning("[WS] Message too large");
-                        break;
-                    }
-                } while (!result.EndOfMessage);
+        // 2) POST /telemetry
+        using (var req = new UnityWebRequest(_telemetryUrl, "POST"))
+        {
+            byte[] body = Encoding.UTF8.GetBytes(json);
+            req.uploadHandler = new UploadHandlerRaw(body);
+            req.downloadHandler = new DownloadHandlerBuffer();
+            req.SetRequestHeader("Content-Type", "application/json");
 
-                if (result.MessageType == WebSocketMessageType.Text && offset > 0)
-                {
-                    string msg = Encoding.UTF8.GetString(buffer, 0, offset);
-                    try
-                    {
-                        // Receive Json -> PacketIn msg
-                        var inbound = JsonUtility.FromJson<PacketIn>(msg);
-                        // If apply, throw into mainJob
-                        if (inbound != null && inbound.apply)
-                        {
-                            _mainJobs.Enqueue(() =>
-                            {
-                                if (inbound.position != null) cameraController.SetCameraPosition(inbound.position.ToV3());
-                                if (inbound.rotationEuler != null) cameraController.SetCameraEulerAngles(inbound.rotationEuler.ToV3());
-                            });
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        Debug.LogWarning("[WS] Parse error: " + ex.Message);
-                    }
-                }
+            yield return req.SendWebRequest();
+
+            // Error judgment after transmission (only supported in 2020.3 or upper)
+            if (req.result != UnityWebRequest.Result.Success)
+            {
+                Debug.LogWarning($"[DataStreamer] Telemetry error ({req.responseCode}): {req.error}");
+                yield break;
             }
-        }
-        catch (OperationCanceledException) { }
-        catch (Exception e)
-        {
-            Debug.LogWarning("[WS] ReceiveLoop error: " + e.Message);
-        }
-    }
 
-    // Close the WebSocket and release resources
-    async void OnDisable()
-    {
-        try
-        {
-            _cts?.Cancel();
-            if (_ws != null && (_ws.State == WebSocketState.Open || _ws.State == WebSocketState.CloseReceived))
-                await _ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "client closing", CancellationToken.None);
-        }
-        catch (Exception e) { Debug.LogWarning("[WS] Close error: " + e.Message); }
-        finally
-        {
-            _ws?.Dispose(); _ws = null;
-            _cts?.Dispose(); _cts = null;
+            // Response logs
+            var respText = req.downloadHandler.text;
+            if (logEveryResponse)
+                Debug.Log($"[DataStreamer] Resp: {respText}");
+
+            // Response datas & Apply
+            try
+            {
+                // respText -> Json
+                var j = JObject.Parse(respText);
+
+                // Response "apply" -> apply info
+                bool apply = j.Value<bool?>("apply") == true;
+                if (!apply) yield break;
+
+                // Grasp the current camera pose as the basis
+                var newPos = cameraController.GetCameraPosition();
+                var newEul = cameraController.GetCameraEulerAngles();
+
+                // pose apply
+                var pose = j["pose"] as JObject;
+                if (pose != null)
+                {
+                    if (pose.ContainsKey("px") && pose["px"]?.Type != JTokenType.Null)
+                        newPos.x = pose.Value<float>("px");
+                    if (pose.ContainsKey("py") && pose["py"]?.Type != JTokenType.Null)
+                        newPos.y = pose.Value<float>("py");
+                    if (pose.ContainsKey("pz") && pose["pz"]?.Type != JTokenType.Null)
+                        newPos.z = pose.Value<float>("pz");
+
+                    if (pose.ContainsKey("rx") && pose["rx"]?.Type != JTokenType.Null)
+                        newEul.x = pose.Value<float>("rx");
+                    if (pose.ContainsKey("ry") && pose["ry"]?.Type != JTokenType.Null)
+                        newEul.y = pose.Value<float>("ry");
+                    if (pose.ContainsKey("rz") && pose["rz"]?.Type != JTokenType.Null)
+                        newEul.z = pose.Value<float>("rz");
+                }
+
+                // fov apply
+                if (j.ContainsKey("fov") && j["fov"]?.Type != JTokenType.Null)
+                {
+                    var fovVal = j.Value<float>("fov");
+                    cameraController.SetCameraFOV(fovVal);
+                }
+
+                // Set camera pose
+                cameraController.SetCameraPosition(newPos);
+                cameraController.SetCameraEulerAngles(newEul);
+            }
+            catch (System.Exception ex)
+            {
+                Debug.LogWarning($"[DataStreamer] Parse/apply control failed (Newtonsoft): {ex.Message}");
+            }
         }
     }
 }

@@ -2005,12 +2005,14 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 7bfce5fb0754ef143ad2e79facb075ab, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  targetCamera: {fileID: 39176957}
-  wsUrl: ws://127.0.0.1:8765
-  sendFPS: 20
-  captureWidth: 640
-  captureHeight: 360
+  cameraController: {fileID: 39176960}
+  serverBaseUrl: http://127.0.0.1:8000
+  telemetryEndpoint: /telemetry
+  sendInterval: 0.1
+  imageWidth: 640
+  imageHeight: 360
   jpegQuality: 60
+  logEveryResponse: 1
 --- !u!1001 &172453338539117362
 PrefabInstance:
   m_ObjectHideFlags: 0
