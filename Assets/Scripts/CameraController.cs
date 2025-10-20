@@ -10,7 +10,7 @@ public class CameraController : MonoBehaviour
     private int _cachedW, _cachedH;
 
     private Camera Cam;
-    void Start()
+    void Awake()
     {
         Cam = GetComponent<Camera>();
     }

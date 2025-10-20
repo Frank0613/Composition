@@ -40,10 +40,13 @@ public class ResponseData
 
 public class DataStreamer : MonoBehaviour
 {
+    private static DataStreamer instance;
+
     [Header("Refs")]
     public CameraController cameraController;
 
     [Header("Server")]
+
     public string serverBaseUrl = "http://127.0.0.1:8000";
     public string telemetryEndpoint = "/telemetry";
     public float sendInterval = 0.1f; // 10Hz
@@ -61,6 +64,14 @@ public class DataStreamer : MonoBehaviour
 
     void Awake()
     {
+        if (instance != null && instance != this)
+        {
+            Destroy(gameObject);
+            return;
+        }
+        instance = this;
+
+
         if (cameraController == null)
         {
             cameraController = GetComponent<CameraController>();

@@ -5,6 +5,8 @@ from fastapi.responses import Response, HTMLResponse, JSONResponse
 import base64
 import threading
 import time
+import uvicorn
+import webbrowser
 
 app = FastAPI(title="Unity Camera Data Server (with Viewer)")
 
@@ -251,3 +253,18 @@ setInterval(tick, 250); // 4Hz viewer refresh，Unity 可更高頻傳
 </html>
     """
     return HTMLResponse(html)
+
+if __name__ == "__main__":
+    import uvicorn
+    import webbrowser
+
+    port = 8000
+    url = f"http://127.0.0.1:{port}/viewer"
+
+    print(f"\n🚀 Server running at {url}")
+    print("Press Ctrl+C to stop.\n")
+
+    # 自動開啟瀏覽器
+    webbrowser.open(url)
+
+    uvicorn.run("server:app", host="0.0.0.0", port=port, reload=False)
