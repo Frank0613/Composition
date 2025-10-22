@@ -11,7 +11,8 @@ public class CameraData
 {
     public PoseData pose;
     public float fov;
-    public string image_b64;
+    public string cam_rgb_b64;
+    public string cam_depth_b64;
     public int width;
     public int height;
 
@@ -44,6 +45,7 @@ public class DataStreamer : MonoBehaviour
 
     [Header("Refs")]
     public CameraController cameraController;
+    public CameraScreen depthCameraController;
 
     [Header("Server")]
 
@@ -51,7 +53,7 @@ public class DataStreamer : MonoBehaviour
     public string telemetryEndpoint = "/telemetry";
     public float sendInterval = 0.1f; // 10Hz
 
-    [Header("Image")]
+    [Header("Screen")]
     public int imageWidth = 640;
     public int imageHeight = 360;
     [Range(1, 100)]
@@ -102,7 +104,8 @@ public class DataStreamer : MonoBehaviour
         var pos = cameraController.GetCameraPosition();
         var eul = cameraController.GetCameraEulerAngles();
         var fov = cameraController.GetCameraFOV();
-        var b64 = cameraController.GetCameraScreen(imageWidth, imageHeight, jpegQuality);
+        var rgb_b64 = cameraController.GetCameraScreen(imageWidth, imageHeight, jpegQuality);
+        var depth_b64 = depthCameraController.GetCameraScreen(imageWidth, imageHeight, jpegQuality);
 
         // Put the datas into CameraData
         var camdata = new CameraData
@@ -117,7 +120,8 @@ public class DataStreamer : MonoBehaviour
                 rz = eul.z
             },
             fov = fov,
-            image_b64 = b64,
+            cam_rgb_b64 = rgb_b64,
+            cam_depth_b64 = depth_b64,
             width = imageWidth,
             height = imageHeight
         };

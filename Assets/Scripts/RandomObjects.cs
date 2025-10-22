@@ -4,11 +4,11 @@ public class RandomObjects : MonoBehaviour
 {
     [Header("Object List")]
     public GameObject[] targetObjects;
+    public int spawnCount = 1;
 
     [Header("Object Spawn Range")]
     public Vector3 spawnPosition = Vector3.zero;
     public Vector2 rangeSize = new Vector2(10f, 10f);
-    public int spawnCount = 1;
     public Transform targetParent;
     void Start()
     {

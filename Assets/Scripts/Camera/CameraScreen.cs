@@ -1,20 +1,16 @@
 using System;
-using System.Collections;
-using System.Collections.Generic;
 using UnityEngine;
 
-public class CameraController : MonoBehaviour
+public class CameraScreen : MonoBehaviour
 {
-    private RenderTexture _rt;
-    private Texture2D _tex;
-    private int _cachedW, _cachedH;
-
-    private Camera Cam;
-    void Awake()
+    protected RenderTexture _rt;
+    protected Texture2D _tex;
+    protected int _cachedW, _cachedH;
+    protected Camera Cam;
+    protected void Awake()
     {
         Cam = GetComponent<Camera>();
     }
-
     // CameraScreen API
     public string GetCameraScreen(int width, int height, int jpegQuality = 70)
     {
@@ -40,9 +36,8 @@ public class CameraController : MonoBehaviour
         byte[] jpg = _tex.EncodeToJPG(Mathf.Clamp(jpegQuality, 1, 100));
         return Convert.ToBase64String(jpg);
     }
-
     // If the width or height changes or no RenderTexture, reset the buffer
-    private void ResetBuffer(int width, int height)
+    protected void ResetBuffer(int width, int height)
     {
 
         if (_rt == null || _cachedW != width || _cachedH != height)
@@ -55,21 +50,11 @@ public class CameraController : MonoBehaviour
     }
 
     // Release old RenderTexture and Texture2D to avoid occupying memory
-    void ReleaseCapture()
+    protected void ReleaseCapture()
     {
         if (_rt) { _rt.Release(); _rt = null; }
         if (_tex) { Destroy(_tex); _tex = null; }
     }
 
-
-    // Camera API
-    public float GetCameraFOV() => Cam.fieldOfView;
-    public void SetCameraFOV(float fov) => Cam.fieldOfView = fov;
-
-    // Position & Rotation API
-    public Vector3 GetCameraPosition() { return transform.position; }
-    public void SetCameraPosition(Vector3 pos) { transform.position = pos; }
-    public Vector3 GetCameraEulerAngles() { return transform.eulerAngles; }
-    public void SetCameraEulerAngles(Vector3 euler) { transform.eulerAngles = euler; }
-    void OnDestroy() => ReleaseCapture();
+    protected void OnDestroy() => ReleaseCapture();
 }

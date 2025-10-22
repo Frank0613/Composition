@@ -8,17 +8,25 @@ import time
 import uvicorn
 import webbrowser
 
-app = FastAPI(title="Unity Camera Data Server (with Viewer)")
+app = FastAPI(title="Unity Camera Data Server (RGB + Depth)")
 
 # ---------- Models ----------
 class PoseData(BaseModel):
     px: float; py: float; pz: float
     rx: float; ry: float; rz: float
 
+# 兼容：保留舊欄位 image_b64（若有人還在發送舊格式）
 class TelemetryPayload(BaseModel):
     pose: PoseData
     fov: float
+
+    # 新格式（推薦，與 DataStreamer.cs 對齊）
+    cam_rgb_b64: Optional[str] = None
+    cam_depth_b64: Optional[str] = None
+
+    # 舊格式（只送一張 image）
     image_b64: Optional[str] = None
+
     width: Optional[int] = None
     height: Optional[int] = None
 
@@ -35,7 +43,8 @@ class ControlResponse(BaseModel):
 current_control = ControlResponse(apply=False, pose=ControlPose(), fov=None)
 
 _state_lock = threading.Lock()
-_last_jpeg: Optional[bytes] = None
+_last_rgb_jpeg: Optional[bytes] = None
+_last_depth_jpeg: Optional[bytes] = None  # 我們用 JPEG 傳色彩化後的深度圖
 _last_pose: Optional[PoseData] = None
 _last_fov: Optional[float] = None
 _last_wh = (None, None)
@@ -46,28 +55,40 @@ _frame_count: int = 0
 @app.post("/telemetry")
 def receive_telemetry(payload: TelemetryPayload):
     """
-    Unity 每次傳遞相機資訊 + 畫面。伺服器回傳 current_control，讓 Unity 立即套用。
+    Unity 每次傳遞相機資訊 + 兩張畫面（RGB / Depth）。回傳 current_control 作為控制指令。
     """
-    global _last_jpeg, _last_pose, _last_fov, _last_wh, _last_update_ts, _frame_count
+    global _last_rgb_jpeg, _last_depth_jpeg, _last_pose, _last_fov, _last_wh, _last_update_ts, _frame_count
     with _state_lock:
         _last_pose = payload.pose
         _last_fov = payload.fov
         _last_wh = (payload.width, payload.height)
         _last_update_ts = time.time()
         _frame_count += 1
-        if payload.image_b64:
+
+        # 優先讀新欄位
+        if payload.cam_rgb_b64:
             try:
-                _last_jpeg = base64.b64decode(payload.image_b64)
+                _last_rgb_jpeg = base64.b64decode(payload.cam_rgb_b64)
             except Exception:
-                # 影像壞掉就忽略，但其他資料仍可顯示
-                _last_jpeg = None
+                _last_rgb_jpeg = None
+
+        if payload.cam_depth_b64:
+            try:
+                _last_depth_jpeg = base64.b64decode(payload.cam_depth_b64)
+            except Exception:
+                _last_depth_jpeg = None
+
+        # 兼容舊欄位：若只送 image_b64，當成 RGB
+        if payload.image_b64 and _last_rgb_jpeg is None:
+            try:
+                _last_rgb_jpeg = base64.b64decode(payload.image_b64)
+            except Exception:
+                _last_rgb_jpeg = None
+
     return current_control
 
 @app.post("/set_control")
 def set_control(ctrl: ControlResponse):
-    """
-    從外部設定新的控制命令（只要填你要改的欄位即可，Unity 端會做部份套用）。
-    """
     global current_control
     current_control = ctrl
     return {"ok": True, "applied": current_control.dict()}
@@ -76,22 +97,28 @@ def set_control(ctrl: ControlResponse):
 def get_control():
     return current_control
 
-# ---------- Viewer helpers ----------
-@app.get("/latest.jpg")
-def latest_frame():
-    """
-    回傳最新一張相機 JPEG 畫面（給 <img> 使用）。
-    """
+# ---------- Image endpoints ----------
+@app.get("/latest_rgb.jpg")
+def latest_rgb():
     with _state_lock:
-        if _last_jpeg is None:
+        if _last_rgb_jpeg is None:
             return Response(status_code=204)
-        return Response(content=_last_jpeg, media_type="image/jpeg")
+        return Response(content=_last_rgb_jpeg, media_type="image/jpeg")
+
+@app.get("/latest_depth.jpg")
+def latest_depth():
+    with _state_lock:
+        if _last_depth_jpeg is None:
+            return Response(status_code=204)
+        return Response(content=_last_depth_jpeg, media_type="image/jpeg")
+
+# 兼容舊版路徑：/latest.jpg 仍回傳 RGB
+@app.get("/latest.jpg")
+def latest_frame_compat():
+    return latest_rgb()
 
 @app.get("/latest")
 def latest_meta():
-    """
-    回傳最新姿態/FOV/時間戳/幀數等資訊（給 viewer JS 輪詢）。
-    """
     with _state_lock:
         if _last_update_ts is None:
             return JSONResponse({"ready": False})
@@ -108,23 +135,21 @@ def latest_meta():
             "frame_count": _frame_count
         })
 
+# ---------- Simple viewer (RGB + Depth) ----------
 @app.get("/viewer")
 def viewer():
-    """
-    簡單的可視化儀表板：左側是即時影像，右側顯示 pose/fov/幀數。
-    """
     html = """
 <!doctype html>
 <html>
 <head>
   <meta charset="utf-8">
-  <title>Unity Camera Viewer</title>
+  <title>Unity Camera Viewer (RGB + Depth)</title>
   <style>
     body { font-family: system-ui, -apple-system, Segoe UI, Roboto, "Noto Sans", Arial, "Microsoft JhengHei", sans-serif; margin: 0; background: #0b0f14; color: #eef2f6; }
-    .wrap { display: grid; grid-template-columns: 2fr 1fr; gap: 16px; padding: 16px; }
+    .wrap { display: grid; grid-template-columns: 2fr 2fr 1.2fr; gap: 16px; padding: 16px; }
     .card { background: #121821; border-radius: 12px; box-shadow: 0 4px 24px rgba(0,0,0,.4); padding: 16px; }
     h1 { margin: 0 0 12px; font-size: 18px; font-weight: 600; }
-    #img { width: 100%; border-radius: 8px; display: block; background: #0e131a; }
+    img.frame { width: 100%; border-radius: 8px; display: block; background: #0e131a; }
     .row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
     .kv { background: #0e131a; border-radius: 8px; padding: 12px; }
     .kv b { display:block; font-size: 12px; color:#a8b3c7; margin-bottom: 6px;}
@@ -136,13 +161,18 @@ def viewer():
     button { background:#1f6feb; color:white; border:0; border-radius:8px; padding:8px 12px; cursor:pointer; }
     input { background:#0e131a; color:#eef2f6; border:1px solid #223043; border-radius:8px; padding:6px 8px; width:100%; }
     label { font-size:12px; color:#a8b3c7; display:block; margin-top:8px;}
+    .cols { display:grid; grid-template-columns:1fr 1fr; gap:12px;}
   </style>
 </head>
 <body>
   <div class="wrap">
     <div class="card">
-      <h1>Live Frame</h1>
-      <img id="img" src="/latest.jpg" alt="frame">
+      <h1>RGB</h1>
+      <img class="frame" id="img_rgb" src="/latest_rgb.jpg" alt="rgb">
+    </div>
+    <div class="card">
+      <h1>Depth (Colorized)</h1>
+      <img class="frame" id="img_depth" src="/latest_depth.jpg" alt="depth">
     </div>
     <div class="card">
       <h1>Telemetry</h1>
@@ -186,68 +216,56 @@ def viewer():
   </div>
 
 <script>
-let lastBust = 0;
+let bust = 0;
+function bustUrl(u){ bust=(bust+1)%1e9; return u+(u.includes("?")?"&":"?")+"_="+bust; }
 
-function bustUrl(u) {
-  lastBust = (lastBust + 1) % 1e9;
-  const sep = u.includes("?") ? "&" : "?";
-  return u + sep + "_=" + lastBust;
-}
-
-async function tick() {
-  try {
+async function tick(){
+  try{
     const r = await fetch("/latest");
     const j = await r.json();
-    if (!j.ready) {
-      document.getElementById("size").textContent = "-";
-      document.getElementById("fov").textContent = "-";
-      document.getElementById("pos").textContent = "-";
-      document.getElementById("rot").textContent = "-";
+    if(!j.ready){
+      document.getElementById("size").textContent="-";
+      document.getElementById("fov").textContent="-";
+      document.getElementById("pos").textContent="-";
+      document.getElementById("rot").textContent="-";
       return;
     }
-    if (j.width && j.height) {
+    if(j.width && j.height){
       document.getElementById("size").textContent = j.width + "×" + j.height;
     }
     document.getElementById("fov").textContent = j.fov ?? "-";
-    if (j.pose) {
-      const p = j.pose;
+    if(j.pose){
+      const p=j.pose;
       document.getElementById("pos").textContent = `${p.px.toFixed(3)}, ${p.py.toFixed(3)}, ${p.pz.toFixed(3)}`;
       document.getElementById("rot").textContent = `${p.rx.toFixed(2)}, ${p.ry.toFixed(2)}, ${p.rz.toFixed(2)}`;
     }
     document.getElementById("fc").textContent = j.frame_count ?? "-";
-    if (j.updated_at) {
-      const d = new Date(j.updated_at * 1000);
+    if(j.updated_at){
+      const d = new Date(j.updated_at*1000);
       document.getElementById("ts").textContent = d.toLocaleTimeString();
     }
-    // 刷新影像（cache-busting）
-    const img = document.getElementById("img");
-    img.src = bustUrl("/latest.jpg");
-  } catch (e) {
-    // ignore
-  }
-}
 
-async function applyControl() {
-  const body = { apply: true, pose: {}, };
+    // 刷新兩張圖
+    document.getElementById("img_rgb").src   = bustUrl("/latest_rgb.jpg");
+    document.getElementById("img_depth").src = bustUrl("/latest_depth.jpg");
+  }catch(e){ /* ignore */ }
+}
+async function applyControl(){
+  const body = { apply: true, pose: {} };
   const g = id => document.getElementById(id).value.trim();
   const f = g("fov_in");
-  const fields = ["px","py","pz","rx","ry","rz"];
-  fields.forEach(k => {
-    const v = g(k);
-    if (v !== "") body.pose[k] = parseFloat(v);
+  ["px","py","pz","rx","ry","rz"].forEach(k=>{
+    const v=g(k); if(v!=="") body.pose[k]=parseFloat(v);
   });
-  if (f !== "") body.fov = parseFloat(f);
-  await fetch("/set_control", { method:"POST", headers:{ "Content-Type":"application/json" }, body: JSON.stringify(body) });
+  if(f!=="") body.fov=parseFloat(f);
+  await fetch("/set_control",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
 }
-
-async function clearControl() {
-  await fetch("/set_control", { method:"POST", headers:{ "Content-Type":"application/json" }, body: JSON.stringify({apply:false})});
+async function clearControl(){
+  await fetch("/set_control",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({apply:false})});
 }
-
 document.getElementById("apply").addEventListener("click", applyControl);
 document.getElementById("clear").addEventListener("click", clearControl);
-
-setInterval(tick, 250); // 4Hz viewer refresh，Unity 可更高頻傳
+setInterval(tick, 250);
 </script>
 </body>
 </html>
@@ -255,16 +273,9 @@ setInterval(tick, 250); // 4Hz viewer refresh，Unity 可更高頻傳
     return HTMLResponse(html)
 
 if __name__ == "__main__":
-    import uvicorn
-    import webbrowser
-
     port = 8000
     url = f"http://127.0.0.1:{port}/viewer"
-
     print(f"\n🚀 Server running at {url}")
     print("Press Ctrl+C to stop.\n")
-
-    # 自動開啟瀏覽器
     webbrowser.open(url)
-
     uvicorn.run("server:app", host="0.0.0.0", port=port, reload=False)
