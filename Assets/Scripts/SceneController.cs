@@ -7,6 +7,8 @@ public class SceneController : MonoBehaviour
     [Header("Test mode")]
     public bool testMode = false;
 
+    public static event Action OnSceneReset;
+
     void Update()
     {
         if (testMode)
@@ -17,6 +19,8 @@ public class SceneController : MonoBehaviour
     }
     public void ResetScene()
     {
+        OnSceneReset?.Invoke();
+
         Scene currentScene = SceneManager.GetActiveScene();
         SceneManager.LoadScene(currentScene.name);
     }

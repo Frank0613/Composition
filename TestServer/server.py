@@ -15,18 +15,14 @@ class PoseData(BaseModel):
     px: float; py: float; pz: float
     rx: float; ry: float; rz: float
 
-# 兼容：保留舊欄位 image_b64（若有人還在發送舊格式）
 class TelemetryPayload(BaseModel):
     pose: PoseData
     fov: float
-
     # 新格式（推薦，與 DataStreamer.cs 對齊）
     cam_rgb_b64: Optional[str] = None
     cam_depth_b64: Optional[str] = None
-
     # 舊格式（只送一張 image）
     image_b64: Optional[str] = None
-
     width: Optional[int] = None
     height: Optional[int] = None
 
@@ -35,21 +31,40 @@ class ControlPose(BaseModel):
     rx: Optional[float] = None; ry: Optional[float] = None; rz: Optional[float] = None
 
 class ControlResponse(BaseModel):
+    # 與 DataStreamer.cs 對應的欄位
     apply: bool = False
     fov: Optional[float] = None
     pose: Optional[ControlPose] = None
+    # 新增：測試用旗標
+    isReset: bool = False   # one-shot：回傳一次後自動清除
+    isDone: bool  = False   # sticky：維持為 True，直到 reset 後清除
 
 # ---------- In-memory states ----------
 current_control = ControlResponse(apply=False, pose=ControlPose(), fov=None)
-
 _state_lock = threading.Lock()
+
 _last_rgb_jpeg: Optional[bytes] = None
-_last_depth_jpeg: Optional[bytes] = None  # 我們用 JPEG 傳色彩化後的深度圖
+_last_depth_jpeg: Optional[bytes] = None
 _last_pose: Optional[PoseData] = None
 _last_fov: Optional[float] = None
 _last_wh = (None, None)
 _last_update_ts: Optional[float] = None
 _frame_count: int = 0
+
+def _snapshot_and_fold_reset() -> ControlResponse:
+    """
+    取出 current_control 的快照。
+    若 isReset 為 True：回傳快照後，立刻把 current_control.isReset 清為 False，
+    並同時把 current_control.isDone 清為 False（視為一次完整 Reset 流程）。
+    """
+    global current_control
+    with _state_lock:
+        snap = ControlResponse(**current_control.dict())
+        if current_control.isReset:
+            # one-shot reset：回傳 true 這一次之後就清掉
+            current_control.isReset = False
+            current_control.isDone = False   # reset 時順便解除 done 鎖
+        return snap
 
 # ---------- API ----------
 @app.post("/telemetry")
@@ -85,17 +100,50 @@ def receive_telemetry(payload: TelemetryPayload):
             except Exception:
                 _last_rgb_jpeg = None
 
-    return current_control
+    # 回傳快照（含 isReset one-shot 處理 & reset 時清 isDone）
+    return _snapshot_and_fold_reset()
 
 @app.post("/set_control")
 def set_control(ctrl: ControlResponse):
+    """
+    設定控制值（含 apply/pose/fov 與 isDone/isReset）。
+    - isReset=True：下一次 /telemetry 回傳 isReset=true 後，會自動把伺服器端 isReset->False，且 isDone->False。
+    - isDone=True：會持續為 True，直到發生 reset。
+    """
     global current_control
-    current_control = ctrl
+    with _state_lock:
+        # 僅更新有提供的欄位，未提供的保留
+        d = ctrl.dict()
+        for k, v in d.items():
+            # pydantic 預設給 None 的我們就不覆蓋（避免不小心清掉 pose/fov）
+            if v is None and k in ("fov", "pose"):
+                continue
+            setattr(current_control, k, v)
     return {"ok": True, "applied": current_control.dict()}
 
 @app.get("/control")
 def get_control():
-    return current_control
+    with _state_lock:
+        return current_control
+
+# 快速端點（可用 curl 或網址列直接測）
+@app.post("/done_on")
+def done_on():
+    with _state_lock:
+        current_control.isDone = True
+    return {"ok": True, "isDone": True}
+
+@app.post("/done_off")
+def done_off():
+    with _state_lock:
+        current_control.isDone = False
+    return {"ok": True, "isDone": False}
+
+@app.post("/reset_once")
+def reset_once():
+    with _state_lock:
+        current_control.isReset = True
+    return {"ok": True, "isReset": True}
 
 # ---------- Image endpoints ----------
 @app.get("/latest_rgb.jpg")
@@ -135,7 +183,7 @@ def latest_meta():
             "frame_count": _frame_count
         })
 
-# ---------- Simple viewer (RGB + Depth) ----------
+# ---------- Simple viewer (RGB + Depth + Controls) ----------
 @app.get("/viewer")
 def viewer():
     html = """
@@ -159,9 +207,12 @@ def viewer():
     .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
     .ctrl { margin-top: 12px; }
     button { background:#1f6feb; color:white; border:0; border-radius:8px; padding:8px 12px; cursor:pointer; }
+    button.warn { background:#d29922; }
+    button.danger { background:#f85149; }
     input { background:#0e131a; color:#eef2f6; border:1px solid #223043; border-radius:8px; padding:6px 8px; width:100%; }
     label { font-size:12px; color:#a8b3c7; display:block; margin-top:8px;}
     .cols { display:grid; grid-template-columns:1fr 1fr; gap:12px;}
+    .pill { display:inline-block; font-size:12px; padding:2px 8px; border-radius:999px; background:#0e131a; border:1px solid #223043; margin-right:6px;}
   </style>
 </head>
 <body>
@@ -191,6 +242,14 @@ def viewer():
 
       <div class="ctrl">
         <h1>Quick Control</h1>
+        <div class="row">
+          <div class="kv"><b>Status</b>
+            <div><span class="pill" id="s_apply">apply: -</span>
+                 <span class="pill" id="s_done">isDone: -</span>
+                 <span class="pill" id="s_reset">isReset(next): -</span></div>
+          </div>
+        </div>
+
         <label>Set Position (px,py,pz)</label>
         <div class="row">
           <input id="px" placeholder="px">
@@ -206,9 +265,15 @@ def viewer():
         </div>
         <div class="row" style="margin-top:6px;">
           <input id="rz" placeholder="rz (deg)">
-          <button id="apply">Apply</button>
+          <button id="apply_btn">Apply</button>
+        </div>
+
+        <div class="row" style="margin-top:6px;">
+          <button class="warn" id="done_on">Done ON</button>
+          <button id="done_off">Done OFF</button>
         </div>
         <div class="row" style="margin-top:6px;">
+          <button class="danger" id="reset_once">RESET once</button>
           <button id="clear">Clear Control</button>
         </div>
       </div>
@@ -221,35 +286,41 @@ function bustUrl(u){ bust=(bust+1)%1e9; return u+(u.includes("?")?"&":"?")+"_="+
 
 async function tick(){
   try{
-    const r = await fetch("/latest");
-    const j = await r.json();
-    if(!j.ready){
+    const m = await (await fetch("/latest")).json();
+    if(!m.ready){
       document.getElementById("size").textContent="-";
       document.getElementById("fov").textContent="-";
       document.getElementById("pos").textContent="-";
       document.getElementById("rot").textContent="-";
-      return;
+    }else{
+      if(m.width && m.height){
+        document.getElementById("size").textContent = m.width + "×" + m.height;
+      }
+      document.getElementById("fov").textContent = m.fov ?? "-";
+      if(m.pose){
+        const p=m.pose;
+        document.getElementById("pos").textContent = `${p.px.toFixed(3)}, ${p.py.toFixed(3)}, ${p.pz.toFixed(3)}`;
+        document.getElementById("rot").textContent = `${p.rx.toFixed(2)}, ${p.ry.toFixed(2)}, ${p.rz.toFixed(2)}`;
+      }
+      document.getElementById("fc").textContent = m.frame_count ?? "-";
+      if(m.updated_at){
+        const d = new Date(m.updated_at*1000);
+        document.getElementById("ts").textContent = d.toLocaleTimeString();
+      }
     }
-    if(j.width && j.height){
-      document.getElementById("size").textContent = j.width + "×" + j.height;
-    }
-    document.getElementById("fov").textContent = j.fov ?? "-";
-    if(j.pose){
-      const p=j.pose;
-      document.getElementById("pos").textContent = `${p.px.toFixed(3)}, ${p.py.toFixed(3)}, ${p.pz.toFixed(3)}`;
-      document.getElementById("rot").textContent = `${p.rx.toFixed(2)}, ${p.ry.toFixed(2)}, ${p.rz.toFixed(2)}`;
-    }
-    document.getElementById("fc").textContent = j.frame_count ?? "-";
-    if(j.updated_at){
-      const d = new Date(j.updated_at*1000);
-      document.getElementById("ts").textContent = d.toLocaleTimeString();
-    }
+
+    // 控制狀態
+    const c = await (await fetch("/control")).json();
+    document.getElementById("s_apply").textContent = "apply: " + (c.apply ? "true":"false");
+    document.getElementById("s_done").textContent  = "isDone: " + (c.isDone ? "true":"false");
+    document.getElementById("s_reset").textContent = "isReset(next): " + (c.isReset ? "true":"false");
 
     // 刷新兩張圖
     document.getElementById("img_rgb").src   = bustUrl("/latest_rgb.jpg");
     document.getElementById("img_depth").src = bustUrl("/latest_depth.jpg");
   }catch(e){ /* ignore */ }
 }
+
 async function applyControl(){
   const body = { apply: true, pose: {} };
   const g = id => document.getElementById(id).value.trim();
@@ -257,14 +328,23 @@ async function applyControl(){
   ["px","py","pz","rx","ry","rz"].forEach(k=>{
     const v=g(k); if(v!=="") body.pose[k]=parseFloat(v);
   });
+  if(Object.keys(body.pose).length===0) delete body.pose;
   if(f!=="") body.fov=parseFloat(f);
   await fetch("/set_control",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
 }
 async function clearControl(){
-  await fetch("/set_control",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({apply:false})});
+  await fetch("/set_control",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({apply:false, pose:null, fov:null})});
 }
-document.getElementById("apply").addEventListener("click", applyControl);
+async function doneOn(){ await fetch("/done_on",{method:"POST"}); }
+async function doneOff(){ await fetch("/done_off",{method:"POST"}); }
+async function resetOnce(){ await fetch("/reset_once",{method:"POST"}); }
+
+document.getElementById("apply_btn").addEventListener("click", applyControl);
 document.getElementById("clear").addEventListener("click", clearControl);
+document.getElementById("done_on").addEventListener("click", doneOn);
+document.getElementById("done_off").addEventListener("click", doneOff);
+document.getElementById("reset_once").addEventListener("click", resetOnce);
+
 setInterval(tick, 250);
 </script>
 </body>
