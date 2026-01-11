@@ -442,6 +442,11 @@ MonoBehaviour:
   m_EditorClassIdentifier: 
   moveDuration: 0.25
   rotDuration: 0.25
+  posMin: {x: -0.5, y: 0.9, z: -0.5}
+  posMax: {x: 0.5, y: 1.1, z: 0.3}
+  XRotaRange: {x: -10, y: 10}
+  YRotaRange: {x: -10, y: 10}
+  ZRotaRange: {x: 0, y: 0}
 --- !u!1 &46819799
 GameObject:
   m_ObjectHideFlags: 0

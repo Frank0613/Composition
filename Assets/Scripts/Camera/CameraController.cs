@@ -17,6 +17,41 @@ public class CameraController : CameraScreen
     public Vector3 GetCameraEulerAngles() => transform.eulerAngles;
     public void SetCameraEulerAngles(Vector3 euler) => transform.eulerAngles = euler;
 
+    // ===== 新增：隨機設定 =====
+    [Header("Randomize Position Settings")]
+
+    // 位置範圍（世界座標，長方體邊界）
+    [SerializeField] private Vector3 posMin = new Vector3(-1f, 1f, -1f);
+    [SerializeField] private Vector3 posMax = new Vector3(1f, 2f, 1f);
+
+    [Header("Randomize Rotation Settings")]
+    // 歐拉角範圍（度）
+    [SerializeField] private Vector2 XRotaRange = new Vector2(-10f, 10f);
+    [SerializeField] private Vector2 YRotaRange = new Vector2(0f, 360f);
+    [SerializeField] private Vector2 ZRotaRange = new Vector2(-5f, 5f);
+    void Start()
+    {
+        RandomizeCamera();
+    }
+    public void RandomizeCamera()
+    {
+        Vector3 randPos = new Vector3(
+            Random.Range(posMin.x, posMax.x),
+            Random.Range(posMin.y, posMax.y),
+            Random.Range(posMin.z, posMax.z)
+        );
+
+        Vector3 randEuler = new Vector3(
+            Random.Range(XRotaRange.x, XRotaRange.y),
+            Random.Range(YRotaRange.x, YRotaRange.y),
+            Random.Range(ZRotaRange.x, ZRotaRange.y)
+        );
+
+        SetCameraPosition(randPos, ApplySpace.Absolute, LerpMode.Instant);
+        SetCameraEulerAngles(randEuler, ApplySpace.Absolute, LerpMode.Instant);
+    }
+
+
     // ApplySpace + LerpMode
     public void SetCameraPosition(Vector3 value, ApplySpace space, LerpMode lerp)
     {
